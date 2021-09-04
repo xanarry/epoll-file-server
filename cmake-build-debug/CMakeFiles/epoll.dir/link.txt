@@ -1,0 +1,1 @@
+/usr/bin/cc -g CMakeFiles/epoll.dir/main.c.o CMakeFiles/epoll.dir/socket_buffer.c.o CMakeFiles/epoll.dir/request_handler.c.o CMakeFiles/epoll.dir/event_handler.c.o -o epoll 

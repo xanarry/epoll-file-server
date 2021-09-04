@@ -1,0 +1,42 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/xanarry/CLionProjects/epoll/event_handler.h
+
+/home/xanarry/CLionProjects/epoll/request_handler.c
+unistd.h
+-
+stdio.h
+-
+string.h
+-
+sys/stat.h
+-
+dirent.h
+-
+fcntl.h
+-
+errno.h
+-
+sys/epoll.h
+-
+stdlib.h
+-
+request_handler.h
+/home/xanarry/CLionProjects/epoll/request_handler.h
+socket_buffer.h
+/home/xanarry/CLionProjects/epoll/socket_buffer.h
+event_handler.h
+/home/xanarry/CLionProjects/epoll/event_handler.h
+
+/home/xanarry/CLionProjects/epoll/request_handler.h
+socket_buffer.h
+/home/xanarry/CLionProjects/epoll/socket_buffer.h
+
+/home/xanarry/CLionProjects/epoll/socket_buffer.h
+
