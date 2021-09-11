@@ -49,6 +49,15 @@ static int createServerSocket(int port) {
     return sfd;
 }
 
+/**
+ * 接受新的客户端连接
+ *
+ * 监听套接字上可能同时到来多个客户端建立连接的请求，所以需要将接受请求的处理
+ * 放到死循环中，直到处理完所有客户端的连接请求。
+ *
+ * @param listenFd
+ * @param epollFd
+ */
 void acceptNew(int listenFd, int epollFd) {
     for (;;) {
         struct sockaddr in_addr;
@@ -68,21 +77,24 @@ void acceptNew(int listenFd, int epollFd) {
             printf("Accepted connection on descriptor %d (host=%s, port=%s)\n", infd, hbuf, sbuf);
         }
 
-        /* Make the incoming socket non-blocking and add it to the list of fds to monitor. */
+        //将新建立的连接设置位非阻塞模式，才能有效使用epoll机制
         if (setNonBlocking(infd) == -1) {
             abort();
         }
 
-
+        //为每个新的连接绑定一个连接上下文环境，该上下文包括请求、响应等状态信息以及数据读写缓冲区
         ConnectCtx *connectCtx = (ConnectCtx *) malloc(sizeof(ConnectCtx));
         memset(connectCtx, 0, sizeof(ConnectCtx));
         connectCtx->epollFd = epollFd;
         connectCtx->socketFd = infd;
         connectCtx->req.reqProcState = PARSE_HEAD;
-        connectCtx->req.readBuf = initBuffer(0);
-        connectCtx->resp.writeBuf = initBuffer(0);
-        memset(connectCtx->openedFiles, -1, 128);
+        initBuffer(&(connectCtx->req.readBuf));
+        initBuffer(&(connectCtx->resp.writeBuf));
+        for (int i = 0; i < 128; i++) {
+            connectCtx->openedFiles[0] = -1;
+        }
 
+        //监听新连接的可读事件
         struct epoll_event evt;
         evt.data.ptr = connectCtx;
         evt.events = EPOLLIN | EPOLLET;
@@ -126,7 +138,7 @@ int main(int argc, char *argv[]) {
     event.data.fd = sfd;
     event.events = EPOLLIN | EPOLLET;
     if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {
-        perror("epoll_ctl");
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
         abort();
     }
 
@@ -141,8 +153,7 @@ int main(int argc, char *argv[]) {
                 /* An error has occured on this socketFd, or the socket is not ready for reading (why were we notified then?) */
                 fprintf(stderr, "%d:", events[i].data.fd);
                 if (epoll_ctl(efd, EPOLL_CTL_DEL, events[i].data.fd, &event) == -1) {
-                    perror("epoll_ctl");
-                    abort();
+                    fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
                 }
                 close(events[i].data.fd);
                 continue;

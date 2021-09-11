@@ -15,24 +15,33 @@
 #include "socket_buffer.h"
 #include "event_handler.h"
 
-int createFileList(char *absPath, SocketBuffer *resultBuffer) {
+
+/**
+ *
+ * @param absPath
+ * @param resultBuffer
+ * @return
+ */
+int createFileList(char *absPath, LinkedBuffer *resultBuffer) {
     struct stat st;
     if (stat(absPath, &st) == -1 || !S_ISDIR(st.st_mode)) {
-        char *errMsg = "ERROR\nNo Such Directory";
+        char *errMsg = "No Such Directory";
         bufWrite(resultBuffer, errMsg, (ssize_t) strlen(errMsg));
-        perror("dir check");
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
         return -1;
     }
 
     DIR *dirPtr = NULL;
     if (!(dirPtr = opendir(absPath))) {
-        char *errMsg = "ERROR\nFailed to open folder";
+        char *errMsg = "Failed to open folder";
         bufWrite(resultBuffer, errMsg, (ssize_t) strlen(errMsg));
         fprintf(stdout, "failed to open %s\n", absPath);
         return -1;
     }
 
-    SocketBuffer tmpBuffer = initBuffer();
+    LinkedBuffer tmpBuffer;
+    initBuffer(&tmpBuffer);
+
     size_t maxSizeWidth = 1;
     struct dirent *dirEntry = NULL; /* readdir函数的返回值就存放在这个结构体中 */
     while ((dirEntry = readdir(dirPtr)) != NULL) {
@@ -65,6 +74,7 @@ int createFileList(char *absPath, SocketBuffer *resultBuffer) {
     char line[1024] = {0};
     char formatLine[1050] = {0};
     int seq = 0;
+
     while (hasLine(&tmpBuffer, 1024) != -1) {
         memset(line, 0, 1024);
         memset(formatLine, 0, 1050);
@@ -81,23 +91,34 @@ int createFileList(char *absPath, SocketBuffer *resultBuffer) {
         }
         bufWrite(resultBuffer, formatLine, (ssize_t) strlen(formatLine));
         seq++;
-    }//LIST ../../../../../bin
+    }            //  LIST ../../../../../bin
     return 0;
 }
 
-
+/**
+ *
+ * @param connectCtx
+ */
 void handleList(ConnectCtx *connectCtx) {
     char absBase[1024] = {0};
     char absPath[1500] = {0};
     getcwd(absBase, 1024);
     sprintf(absPath, "%s/%s", absBase, connectCtx->req.fileName);
 
-    if (createFileList(absPath, &(connectCtx->resp.writeBuf)) == -1) {
+    LinkedBuffer contentBuffer = createBuffer();
+    if (createFileList(absPath, &contentBuffer) == -1) {
         connectCtx->resp.status = ERROR;
+        bufWrite(&connectCtx->resp.writeBuf, "ERROR\n", 6);
     } else {
         connectCtx->resp.status = OK;
+        bufWrite(&connectCtx->resp.writeBuf, "OK\n", 3);
+        connectCtx->resp.contentLength = getBufSize(&contentBuffer);
+        bufWrite(&connectCtx->resp.writeBuf, (char *) &(connectCtx->resp.contentLength), sizeof(ssize_t));
     }
-    connectCtx->resp.contentLength = getBufSize(&(connectCtx->resp.writeBuf));
+
+    bufCopy(&connectCtx->resp.writeBuf, &contentBuffer);
+    clearBuf(&contentBuffer);
+
     connectCtx->resp.procState = SEND_HEADER;
 
     connectCtx->event.events = EPOLLET | EPOLLOUT;
@@ -107,7 +128,10 @@ void handleList(ConnectCtx *connectCtx) {
     }
 }
 
-
+/**
+ *
+ * @param connectCtx
+ */
 void handleDelete(ConnectCtx *connectCtx) {
     char absBase[1024] = {0};
     char absPath[1500] = {0};
@@ -118,8 +142,10 @@ void handleDelete(ConnectCtx *connectCtx) {
 
     if (access(absPath, F_OK) == 0 && remove(absPath) == 0) {
         connectCtx->resp.status = OK;
+        bufWrite(&connectCtx->resp.writeBuf, "OK\n", 3);
     } else {
         connectCtx->resp.status = ERROR;
+        bufWrite(&connectCtx->resp.writeBuf, "ERROR\n", 6);
         char *strErr = strerror(errno);
         bufWrite(&(connectCtx->resp.writeBuf), strErr, (ssize_t) strlen(strErr));
     }
@@ -127,7 +153,7 @@ void handleDelete(ConnectCtx *connectCtx) {
 
     connectCtx->event.events = EPOLLET | EPOLLOUT;
     if (epoll_ctl(connectCtx->epollFd, EPOLL_CTL_MOD, connectCtx->socketFd, &connectCtx->event) == -1) {
-        perror("epoll_ctl");
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
         abort();
     }
 }
@@ -155,6 +181,10 @@ uint64_t hton64(const uint64_t *input)
     return (ntoh64(input));
 }
 
+/**
+ *
+ * @param connectCtx
+ */
 void handleGet(ConnectCtx *connectCtx) {
     char absBase[1024] = {0};
     char absPath[1500] = {0};
@@ -165,34 +195,43 @@ void handleGet(ConnectCtx *connectCtx) {
 
     int fd = open(absPath, O_RDONLY);
     struct stat st;
+    char errMsg[1024] = {0};
     connectCtx->openedFiles[0] = -1;
     if (fd == -1 || fstat(fd, &st) == -1) {
         connectCtx->resp.status = ERROR;
         char *strerr = strerror(errno);
-        bufWrite(&(connectCtx->resp.writeBuf), strerr, strlen(strerr));
-        return;
-    }
-
-    if (!S_ISREG(st.st_mode)) {
+        sprintf(errMsg, "%s: %s", connectCtx->req.fileName, strerr);
+    } else if (!S_ISREG(st.st_mode)) {
         connectCtx->resp.status = ERROR;
-        char *strerr = "No such file";
-        bufWrite(&(connectCtx->resp.writeBuf), strerr, strlen(strerr));
-        return;
+        sprintf(errMsg, "%s is not a regular file", connectCtx->req.fileName);
     }
 
-    printf("[%s] is a reg file\n", absPath);
-    connectCtx->resp.status = OK;
-    connectCtx->openedFiles[0] = fd;
-    connectCtx->resp.contentLength = st.st_size;
+    if (connectCtx->resp.status == ERROR) {
+        bufWrite(&(connectCtx->resp.writeBuf), "ERROR\n", 6);
+        bufWrite(&(connectCtx->resp.writeBuf), errMsg, strlen(errMsg));
+    } else {
+        connectCtx->resp.status = OK;
+        connectCtx->openedFiles[0] = fd;
+        connectCtx->resp.contentLength = st.st_size;
+
+        bufWrite(&(connectCtx->resp.writeBuf), "OK\n", 3);
+        bufWrite(&connectCtx->resp.writeBuf, (char *) &(connectCtx->resp.contentLength), sizeof(ssize_t));
+    }
+
     connectCtx->resp.procState = SEND_HEADER;
 
     connectCtx->event.events = EPOLLET | EPOLLOUT;
     if (epoll_ctl(connectCtx->epollFd, EPOLL_CTL_MOD, connectCtx->socketFd, &connectCtx->event) == -1) {
-        perror("epoll_ctl");
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
         abort();
     }
 }
 
+
+/**
+ *
+ * @param connectCtx
+ */
 void handlePost(ConnectCtx *connCtx) {
     if (connCtx->req.reqProcState == PARSE_CONTENT_LEN) {
         //获取文件长度8个字节
@@ -222,7 +261,7 @@ void handlePost(ConnectCtx *connCtx) {
 
         int outFd = open(absPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG);
         if (outFd == -1) {
-            perror("create file");
+            fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
             //todo need to handle error
         }
         connCtx->openedFiles[0] = outFd;
@@ -240,7 +279,7 @@ void handlePost(ConnectCtx *connCtx) {
                 connCtx->resp.procState = SEND_HEADER;
                 connCtx->event.events = EPOLLET | EPOLLOUT;
                 if (epoll_ctl(connCtx->epollFd, EPOLL_CTL_MOD, connCtx->socketFd, &connCtx->event) == -1) {
-                    perror("epoll_ctl");
+                    fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
                     abort();
                 }
                 return;
@@ -264,9 +303,23 @@ void handlePost(ConnectCtx *connCtx) {
             if (n > 0) {
                 hasGot += n;
             } else {
-
                 return;
             }
         }
+    }
+}
+
+
+
+void handleError(ConnectCtx *connectCtx) {
+    connectCtx->resp.status = ERROR;
+    char *head = "ERROR\nBad Request";
+    bufWrite(&connectCtx->resp.writeBuf, head, (ssize_t) strlen(head));
+    connectCtx->resp.procState = SEND_HEADER;
+
+    connectCtx->event.events = EPOLLET | EPOLLOUT;
+    if (epoll_ctl(connectCtx->epollFd, EPOLL_CTL_MOD, connectCtx->socketFd, &connectCtx->event) == -1) {
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
+        abort();
     }
 }

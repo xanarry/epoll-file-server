@@ -15,6 +15,7 @@ enum ReqProcState {
 };
 
 enum Method {
+    BAD_REQ,
     GET,
     POST,
     LIST,
@@ -28,7 +29,7 @@ enum RespStatus {
 
 typedef struct Request {
     enum Method method;
-    SocketBuffer readBuf;
+    LinkedBuffer readBuf;
     ssize_t contentLength;
     char fileName[256];
 
@@ -43,9 +44,8 @@ enum RespProcState {
 
 typedef struct Response {
     enum RespStatus status;
-    SocketBuffer writeBuf;
+    LinkedBuffer writeBuf;
     ssize_t contentLength;
-
     enum RespProcState procState;
 } Response;
 
@@ -67,6 +67,10 @@ void handleDelete(ConnectCtx *connectCtx);
 
 void handleGet(ConnectCtx *connectCtx);
 
+
 void handlePost(ConnectCtx *connCtx);
+
+
+void handleError(ConnectCtx *connCtx);
 
 #endif //EPOLL_REQUEST_HANDLER_H

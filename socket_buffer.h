@@ -7,6 +7,7 @@
 
 #define BUF_SEG_SIZE 4096
 
+
 typedef struct BufNode {
     ssize_t seq;
     char buf[BUF_SEG_SIZE];
@@ -18,32 +19,35 @@ typedef struct socketBuffer {
     BufNode *writeNode;
     ssize_t writeOffset;
     BufNode *bufHead;
-} SocketBuffer;
+} LinkedBuffer;
 
-SocketBuffer initBuffer();
+LinkedBuffer createBuffer();
+void initBuffer(LinkedBuffer *buffer);
 
 BufNode *newNode(ssize_t seq);
 
 //自动扩容
-ssize_t bufWrite(SocketBuffer *sktBuffer, char *buf, ssize_t size);
+ssize_t bufWrite(LinkedBuffer *sktBuffer, char *buf, ssize_t size);
 
-ssize_t copyToBuf(SocketBuffer *sktBuffer, int fd);
+ssize_t copyToBuf(LinkedBuffer *sktBuffer, int fd);
 
-ssize_t copyNByteToBuf(SocketBuffer *sktBuffer, int fd, ssize_t bytesToRead, ssize_t *);
+ssize_t copyNByteToBuf(LinkedBuffer *sktBuffer, int fd, ssize_t bytesToRead, ssize_t *);
 
 //自动清出
-ssize_t bufRead(SocketBuffer *sktBuffer, char *buf, ssize_t size);
+ssize_t bufRead(LinkedBuffer *bufObj, char *buf, ssize_t size);
 
-ssize_t bufReadToFile(SocketBuffer *netBuffer, int fd, ssize_t size);
+ssize_t bufReadToFile(LinkedBuffer *netBuffer, int fd, ssize_t size);
 
 
-ssize_t bufReadline(SocketBuffer *sktBuffer, char *buf, ssize_t size);
+ssize_t bufReadline(LinkedBuffer *sktBuffer, char *buf, ssize_t size);
 
-int hasLine(SocketBuffer *sktBuffer, int maxLineSize);
+int hasLine(LinkedBuffer *sktBuffer, int maxLineSize);
 
-void clear(SocketBuffer *sktBuffer);
+void clearBuf(LinkedBuffer *sktBuffer);
 
-ssize_t getBufSize(SocketBuffer *netBuffer);
+ssize_t getBufSize(LinkedBuffer *);
+
+size_t bufCopy(LinkedBuffer *desc, LinkedBuffer *src);
 
 
 #endif //EPOLL_SOCKET_BUFFER_H

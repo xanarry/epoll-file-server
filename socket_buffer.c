@@ -10,14 +10,21 @@
 #include <errno.h>
 #include "socket_buffer.h"
 
-
-SocketBuffer initBuffer() {
-    SocketBuffer buffer;
+LinkedBuffer createBuffer() {
+    LinkedBuffer buffer;
     buffer.readOffset = 0;
     buffer.writeOffset = 0;
     buffer.bufHead = NULL;
     buffer.writeNode = buffer.bufHead;
     return buffer;
+}
+
+
+void initBuffer(LinkedBuffer *buffer) {
+    buffer->readOffset = 0;
+    buffer->writeOffset = 0;
+    buffer->bufHead = NULL;
+    buffer->writeNode = buffer->bufHead;
 }
 
 
@@ -32,56 +39,118 @@ BufNode *newNode(ssize_t seq) {
     return node;
 }
 
+
+/**
+ * 从缓冲区对象中读取字节到指定数组
+ *
+ * 读的时候先读取第一个第一个节点的数据，因为第一个节点可能不是满的，或者第一个节点的数据量就满足需求.
+ * 读完一个节点的字节时候，自动释放掉该节点的内存。
+ *
+ * @param bufObj
+ * @param buf
+ * @param sz
+ * @return 返回实际读取到的字节数，实际返回值可能小于预期值
+ */
+ssize_t bufRead(LinkedBuffer *bufObj, char *buf, const ssize_t sz) {
+    ssize_t availSize = getBufSize(bufObj);
+    if (availSize <= 0) {
+        return 0; //没有数据可以读
+    }
+
+    ssize_t size = sz;
+    if (availSize < sz) {
+        size = availSize; //实际可读数据小于预期的数据，设置读取量为实际可用量
+    }
+
+
+    ssize_t readCnt = size; //当前链表节点可以读的字节数
+    ssize_t hasRead = 0; //全局已读取字节数
+
+    //如果链表的第一个节点有数据要读，特殊处理
+    ssize_t readOffset = bufObj->readOffset % BUF_SEG_SIZE;
+    if (readOffset != 0) {
+        ssize_t nodeRemain = BUF_SEG_SIZE - readOffset;
+        if (nodeRemain < readCnt) {
+            readCnt = nodeRemain; //如果链表节点内字节数不足预期，那么最多只能读取本节点剩下的字节数
+        }
+        memcpy(buf + hasRead, bufObj->bufHead->buf + readOffset, readCnt);
+        bufObj->readOffset += readCnt;
+        hasRead += readCnt;
+
+        //正好读完一个节点, 或者读完全部数据
+        if (bufObj->readOffset % BUF_SEG_SIZE == 0 || getBufSize(bufObj) == 0) {
+            BufNode *old = bufObj->bufHead;
+            bufObj->bufHead = bufObj->bufHead->next;
+            free(old);
+        }
+    }
+
+    //循环读取后面的链表
+    while (hasRead < size) {
+        readCnt = size - hasRead; //计算还要读取的量
+        if (readCnt >= BUF_SEG_SIZE) {
+            readCnt = BUF_SEG_SIZE; //每次读取的最大量为BUF_SEG_SIZE
+        }
+        memcpy(buf + hasRead, bufObj->bufHead->buf + (bufObj->readOffset % BUF_SEG_SIZE), readCnt);
+        bufObj->readOffset += readCnt;
+        hasRead += readCnt;
+
+        if (readCnt == BUF_SEG_SIZE || getBufSize(bufObj) == 0) {
+            BufNode *old = bufObj->bufHead;
+            bufObj->bufHead = bufObj->bufHead->next;
+            free(old);
+        }
+    }
+
+    return hasRead;
+}
+
 /**
  * 将字节写入缓冲区，自动扩容，容量没有限制
+ *
+ * 首先判断第一个节点是否读完，没有则特殊处理。后续节点放到循环中
+ *
  * @param sktBuffer
  * @param buf
  * @param size
- * @return 返回实际写入的字节数
+ * @return 返回实际写入的字节数，如果申请内存失败，返回-1
  */
-ssize_t bufWrite(SocketBuffer *sktBuffer, char *buf, const ssize_t size) {
-    if (sktBuffer->writeOffset == 0 || sktBuffer->writeOffset % BUF_SEG_SIZE == 0 /*|| getBufSize(sktBuffer) == 0*/) { //last node full
-        BufNode *node = newNode(0);
+ssize_t bufWrite(LinkedBuffer *sktBuffer, char *buf, const ssize_t size) {
+    ssize_t writeCnt = 0;
+    ssize_t inputOffset = 0;
+    ssize_t wrOffsetOfLastNode = sktBuffer->writeOffset % BUF_SEG_SIZE;
+    if (getBufSize(sktBuffer) != 0 && wrOffsetOfLastNode != 0) { //末尾节点没有写满
+        writeCnt = BUF_SEG_SIZE - wrOffsetOfLastNode; //写入量为剩下的空间
+        if (size < writeCnt) {
+            writeCnt = size;
+        }
+        memcpy(sktBuffer->writeNode->buf + wrOffsetOfLastNode, buf + inputOffset, writeCnt);
+        sktBuffer->writeOffset += writeCnt;
+        inputOffset += writeCnt;
+    }
+
+    //如果写入节点为一个新节点的起点
+    ssize_t byteRemain = size - writeCnt;
+    while (byteRemain > 0) {
+        ssize_t seq = 0;
+        if (getBufSize(sktBuffer) == 0) { //如果是数据被读完/初始化的情况，重置缓冲对象
+            initBuffer(sktBuffer);
+        } else {
+            seq = sktBuffer->writeNode->seq + 1;
+        }
+
+        BufNode *node = newNode(seq);
         if (node == NULL) {
             return -1;
         }
 
-//        if (getBufSize(sktBuffer) == 0) {
-//            sktBuffer->readOffset = 0;
-//            sktBuffer->writeOffset = 0;
-//        }
-
         if (sktBuffer->bufHead == NULL) {
-            sktBuffer->bufHead = node;
-        } else {
-            node->seq = sktBuffer->writeNode->seq + 1;
+            sktBuffer->bufHead = node; //初始化状态
+        } else { //末尾节点写满状态
             sktBuffer->writeNode->next = node;
         }
         sktBuffer->writeNode = node;
-    }
-    ssize_t nodeRemain = BUF_SEG_SIZE - sktBuffer->writeOffset % BUF_SEG_SIZE;
-    ssize_t writeCnt = nodeRemain;
-    ssize_t inputOffset = 0;
-    if (nodeRemain > 0) {
-        if (size < nodeRemain) {
-            writeCnt = size;
-        }
-        memcpy(sktBuffer->writeNode->buf + (sktBuffer->writeOffset % BUF_SEG_SIZE), buf + inputOffset, writeCnt);
-        sktBuffer->writeOffset += writeCnt;
-        inputOffset += writeCnt;
 
-        if (size < nodeRemain) {
-            return sktBuffer->writeOffset;
-        }
-    }
-    ssize_t byteRemain = size - writeCnt;
-    while (byteRemain > 0) {
-        BufNode *node = newNode(sktBuffer->writeNode->seq + 1);
-        if (node == NULL) {
-            return -1;
-        }
-        sktBuffer->writeNode->next = node;
-        sktBuffer->writeNode = sktBuffer->writeNode->next;
         writeCnt = BUF_SEG_SIZE;
         if (byteRemain < BUF_SEG_SIZE) {
             writeCnt = byteRemain;
@@ -102,7 +171,7 @@ ssize_t bufWrite(SocketBuffer *sktBuffer, char *buf, const ssize_t size) {
  * @param fd
  * @return 返回值与read一样，返回-2表示缓冲区内存错误。
  */
-ssize_t copyToBuf(SocketBuffer *sktBuffer, int fd) {
+ssize_t copyToBuf(LinkedBuffer *sktBuffer, int fd) {
     char buf[BUF_SEG_SIZE];
     ssize_t len = 0;
     while (1) {
@@ -127,7 +196,7 @@ ssize_t copyToBuf(SocketBuffer *sktBuffer, int fd) {
  * @param copiedSize 实际读取的字节数
  * @return 如果顺利读满指定字节数，返回值为最后一次read返回的值，实际读取的字节数保存到copiedSize中
  */
-ssize_t copyNByteToBuf(SocketBuffer *sktBuffer, int fd, const ssize_t n, ssize_t *copiedSize) {
+ssize_t copyNByteToBuf(LinkedBuffer *sktBuffer, int fd, const ssize_t n, ssize_t *copiedSize) {
     char buf[BUF_SEG_SIZE];
     ssize_t copiedCnt = 0;
     ssize_t rdRet = 0;
@@ -152,78 +221,15 @@ ssize_t copyNByteToBuf(SocketBuffer *sktBuffer, int fd, const ssize_t n, ssize_t
     return rdRet;
 }
 
-/**
- * 从缓冲区对象中读取字节到指定数组
- * @param sktBuffer
- * @param buf
- * @param sz
- * @return 返回实际读取到的字节数
- */
-ssize_t bufRead(SocketBuffer *sktBuffer, char *buf, const ssize_t sz) {
-    ssize_t availSize = getBufSize(sktBuffer);
-    if (availSize <= 0) {
-        return 0; //没有数据可以读
-    }
-
-    ssize_t size = sz;
-    if (availSize < sz) {
-        size = availSize; //实际可读数据小于预期的数据，设置读取量为实际可用量
-    }
-
-
-    ssize_t readCnt = size; //当前链表节点可以读的字节数
-    ssize_t hasRead = 0; //全局已读取字节数
-
-    //对于链表的第一个节点特殊处理
-    if (sktBuffer->readOffset != 0 && sktBuffer->readOffset % BUF_SEG_SIZE != 0) {
-        ssize_t nodeRemain = BUF_SEG_SIZE - (sktBuffer->readOffset % BUF_SEG_SIZE);
-        if (nodeRemain < readCnt) {
-            readCnt = nodeRemain; //如果链表节点内字节数不足预期，那么最多只能读取本节点剩下的字节数
-        }
-        memcpy(buf + hasRead, sktBuffer->bufHead->buf + (sktBuffer->readOffset % BUF_SEG_SIZE), readCnt);
-        sktBuffer->readOffset += readCnt;
-        hasRead += readCnt;
-
-        //正好读完一个节点
-        if (sktBuffer->readOffset % BUF_SEG_SIZE == 0 /*|| getBufSize(sktBuffer) == 0*/) {
-            BufNode *old = sktBuffer->bufHead;
-            sktBuffer->bufHead = sktBuffer->bufHead->next;
-            free(old);
-        }
-
-        if (hasRead == size) {
-            return size;
-        }
-    }
-
-    //循环读取后面的链表
-    while (hasRead < size) {
-        readCnt = size - hasRead; //计算还要读取的量
-        if (readCnt >= BUF_SEG_SIZE) {
-            readCnt = BUF_SEG_SIZE; //每次读取的最大量为BUF_SEG_SIZE
-        }
-        memcpy(buf + hasRead, sktBuffer->bufHead->buf + (sktBuffer->readOffset % BUF_SEG_SIZE), readCnt);
-        sktBuffer->readOffset += readCnt;
-        hasRead += readCnt;
-
-        if (readCnt == BUF_SEG_SIZE/* || getBufSize(sktBuffer) == 0*/) {
-            BufNode *old = sktBuffer->bufHead;
-            sktBuffer->bufHead = sktBuffer->bufHead->next;
-            free(old);
-        }
-    }
-
-    return hasRead;
-}
 
 /**
  * 从缓冲区对象中读取字节写入到指定文件描述符
  * @param netBuffer
  * @param fd
  * @param sz
- * @return 返回实际写入成功的数据量
+ * @return 返回实际写入成功的数据量，出错时返回write的返回值
  */
-ssize_t bufReadToFile(SocketBuffer *sktBuffer, int fd, const ssize_t sz) {
+ssize_t bufReadToFile(LinkedBuffer *sktBuffer, int fd, const ssize_t sz) {
     ssize_t availSize = getBufSize(sktBuffer);
     if (availSize <= 0) {
         return 0;
@@ -237,14 +243,15 @@ ssize_t bufReadToFile(SocketBuffer *sktBuffer, int fd, const ssize_t sz) {
     ssize_t readCnt = size; //当前链表节点可以读的字节数
     ssize_t hasRead = 0; //全局已读取字节数
 
-    //对于链表的第一个节点特殊处理
-    if (sktBuffer->readOffset != 0 && sktBuffer->readOffset % BUF_SEG_SIZE != 0) {
-        ssize_t nodeRemain = BUF_SEG_SIZE - (sktBuffer->readOffset % BUF_SEG_SIZE);
+    //如果链表的第一个节点有数据要读，特殊处理
+    ssize_t readOffset = sktBuffer->readOffset % BUF_SEG_SIZE;
+    if (readOffset != 0) {
+        ssize_t nodeRemain = BUF_SEG_SIZE - readOffset;
         if (nodeRemain < readCnt) {
             readCnt = nodeRemain;
         }
 
-        ssize_t wrRet = write(fd, sktBuffer->bufHead->buf + (sktBuffer->readOffset % BUF_SEG_SIZE), readCnt);
+        ssize_t wrRet = write(fd, sktBuffer->bufHead->buf + readOffset, readCnt);
         if (wrRet == -1) {
             return -1;
         } else {
@@ -253,14 +260,10 @@ ssize_t bufReadToFile(SocketBuffer *sktBuffer, int fd, const ssize_t sz) {
         }
 
 
-        if (sktBuffer->readOffset % BUF_SEG_SIZE == 0) {
+        if (sktBuffer->readOffset % BUF_SEG_SIZE == 0 || getBufSize(sktBuffer) == 0) {
             BufNode *old = sktBuffer->bufHead;
             sktBuffer->bufHead = sktBuffer->bufHead->next;
             free(old);
-        }
-
-        if (hasRead == size) {
-            return size;
         }
     }
 
@@ -279,7 +282,7 @@ ssize_t bufReadToFile(SocketBuffer *sktBuffer, int fd, const ssize_t sz) {
             hasRead += wrRet;
         }
 
-        if (readCnt == BUF_SEG_SIZE) {
+        if (readCnt == BUF_SEG_SIZE || getBufSize(sktBuffer) == 0) {
             BufNode *old = sktBuffer->bufHead;
             sktBuffer->bufHead = sktBuffer->bufHead->next;
             free(old);
@@ -297,7 +300,7 @@ ssize_t bufReadToFile(SocketBuffer *sktBuffer, int fd, const ssize_t sz) {
  * @param size 一行的最大长度限制
  * @return 返回一行数的字符数
  */
-ssize_t bufReadline(SocketBuffer *sktBuffer, char *line, const ssize_t size) {
+ssize_t bufReadline(LinkedBuffer *sktBuffer, char *line, const ssize_t size) {
     ssize_t idx = 0;
     while (idx < size) {
         char buf[1];
@@ -305,7 +308,7 @@ ssize_t bufReadline(SocketBuffer *sktBuffer, char *line, const ssize_t size) {
             break;
         }
 
-        if (buf[0] == '\n' || buf[0] == '\r') { //读到行末尾，返回
+        if (buf[0] == '\n' || buf[0] == '\r' || getBufSize(sktBuffer) == 0) { //读到行末尾，返回
             break;
         }
 
@@ -321,7 +324,7 @@ ssize_t bufReadline(SocketBuffer *sktBuffer, char *line, const ssize_t size) {
  * @param maxLineSize
  * @return -1 means has no line
  */
-int hasLine(SocketBuffer *sktBuffer, int maxLineSize) {
+int hasLine(LinkedBuffer *sktBuffer, int maxLineSize) {
     BufNode *cur = sktBuffer->bufHead;
     for (int i = 0; i < maxLineSize; i++) {
         ssize_t readIdx = sktBuffer->readOffset + i;
@@ -329,11 +332,11 @@ int hasLine(SocketBuffer *sktBuffer, int maxLineSize) {
             return -1;
         }
 
-        if (readIdx != 0 && readIdx % BUF_SEG_SIZE == 0) {
+        if (readIdx != sktBuffer->readOffset && readIdx % BUF_SEG_SIZE == 0) {
             cur = cur->next;
         }
 
-        if (cur->buf[readIdx % BUF_SEG_SIZE] == '\n') {
+        if (cur != NULL && (cur->buf[readIdx % BUF_SEG_SIZE] == '\n' || sktBuffer->writeOffset == readIdx)) {
             return i;
         }
     }
@@ -345,14 +348,14 @@ int hasLine(SocketBuffer *sktBuffer, int maxLineSize) {
  * 清空缓冲区
  * @param sktBuffer
  */
-void clear(SocketBuffer *sktBuffer) {
+void clearBuf(LinkedBuffer *sktBuffer) {
     if (sktBuffer->bufHead == NULL) {
         return;
     }
 
     BufNode *cur = sktBuffer->bufHead;
-    while (cur) {
-        BufNode *next = sktBuffer->bufHead->next;
+    while (cur != NULL) {
+        BufNode *next = cur->next;
         free(cur);
         cur = next;
     }
@@ -364,9 +367,52 @@ void clear(SocketBuffer *sktBuffer) {
  * @param buffer
  * @return 可读大小
  */
-ssize_t getBufSize(SocketBuffer *buffer) {
+ssize_t getBufSize(LinkedBuffer *buffer) {
     if (buffer == NULL) {
         return 0;
     }
     return buffer->writeOffset - buffer->readOffset;
+}
+
+
+/**
+ * 复制一个缓冲对象的数据到另一个缓冲对象，且不清除原始对象的数据
+ * @param desc
+ * @param src
+ * @return 成功复制返回0，发生错误返回-1
+ */
+size_t bufCopy(LinkedBuffer *desc, LinkedBuffer *src) {
+    ssize_t offset = src->readOffset % BUF_SEG_SIZE;
+    BufNode *cur = src->bufHead;
+    ssize_t len = 0;
+    //先处理第一个节点
+    if (offset != 0) {
+        len = bufWrite(desc, cur->buf + offset, BUF_SEG_SIZE - offset);
+        if (len < 0) {
+            return -1;
+        }
+        cur = cur->next;
+    }
+
+    //处理后续节点
+
+    while (cur != NULL) {
+        if (cur == src->writeNode) {
+            ssize_t cnt = src->writeOffset % BUF_SEG_SIZE;
+            if (cnt == 0) {
+                cnt = BUF_SEG_SIZE;
+            }
+
+            if (bufWrite(desc, cur->buf, cnt) == -1) {
+                return -1;
+            }
+            break;
+        } else {
+            if (bufWrite(desc, cur->buf, BUF_SEG_SIZE) == -1) {
+                return -1;
+            }
+        }
+        cur = cur->next;
+    }
+    return 0;
 }
