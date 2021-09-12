@@ -299,7 +299,7 @@ int main(int argc, char *argv[]) {
     }
 
     int sfd = connectToServer(argv[1], argv[2]);
-    puts("Connected");
+    //puts("Connected");
     upper(argv[3]);
 
     if (strcmp(argv[3], "GET") == 0) {
