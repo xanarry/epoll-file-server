@@ -22,28 +22,28 @@ typedef struct socketBuffer {
 } LinkedBuffer;
 
 LinkedBuffer createBuffer();
-void initBuffer(LinkedBuffer *buffer);
+void initBuffer(LinkedBuffer *bufferObj);
 
 BufNode *newNode(ssize_t seq);
 
 //自动扩容
-ssize_t bufWrite(LinkedBuffer *sktBuffer, char *buf, ssize_t size);
+ssize_t bufWrite(LinkedBuffer *bufferObj, char *buf, ssize_t size);
 
 ssize_t copyToBuf(LinkedBuffer *sktBuffer, int fd);
 
-ssize_t copyNByteToBuf(LinkedBuffer *sktBuffer, int fd, ssize_t bytesToRead, ssize_t *);
+ssize_t copyNByteToBuf(LinkedBuffer *bufferObj, int fd, ssize_t bytesToRead, ssize_t *);
 
 //自动清出
-ssize_t bufRead(LinkedBuffer *bufObj, char *buf, ssize_t size);
+ssize_t bufRead(LinkedBuffer *bufferObj, char *buf, ssize_t size);
 
-ssize_t bufReadToFile(LinkedBuffer *netBuffer, int fd, ssize_t size);
+ssize_t bufReadToFile(LinkedBuffer *bufferObj, int fd, ssize_t size);
 
 
-ssize_t bufReadline(LinkedBuffer *sktBuffer, char *buf, ssize_t size);
+ssize_t bufReadline(LinkedBuffer *bufferObj, char *buf, ssize_t size);
 
-int hasLine(LinkedBuffer *sktBuffer, int maxLineSize);
+int hasLine(LinkedBuffer *bufferObj, int maxLineSize);
 
-void clearBuf(LinkedBuffer *sktBuffer);
+void clearBuf(LinkedBuffer *bufferObj);
 
 ssize_t getBufSize(LinkedBuffer *);
 

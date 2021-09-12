@@ -7,8 +7,6 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <errno.h>
-#include <dirent.h>
-#include <sys/stat.h>
 
 #include "socket_buffer.h"
 #include "request_handler.h"

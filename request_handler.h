@@ -7,6 +7,8 @@
 
 #include "socket_buffer.h"
 
+#define OPEN_ERROR 0x7FFFFFFF
+
 enum ReqProcState {
     PARSE_HEAD,
     PARSE_CONTENT_LEN,
@@ -30,6 +32,7 @@ enum RespStatus {
 typedef struct Request {
     enum Method method;
     LinkedBuffer readBuf;
+    ssize_t hasRecvd;
     ssize_t contentLength;
     char fileName[256];
 
@@ -46,6 +49,7 @@ typedef struct Response {
     enum RespStatus status;
     LinkedBuffer writeBuf;
     ssize_t contentLength;
+
     enum RespProcState procState;
 } Response;
 
@@ -68,7 +72,7 @@ void handleDelete(ConnectCtx *connectCtx);
 void handleGet(ConnectCtx *connectCtx);
 
 
-void handlePost(ConnectCtx *connCtx);
+void handlePost(ConnectCtx *connectCtx);
 
 
 void handleError(ConnectCtx *connCtx);

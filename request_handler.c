@@ -16,6 +16,13 @@
 #include "event_handler.h"
 
 
+void setErrMsg(LinkedBuffer *buffer, char *errMsg) {
+    char errs[4096];
+    sprintf(errs, "ERROR\n%s\n", errMsg);
+    bufWrite(buffer, errs, strlen(errs));
+}
+
+
 /**
  *
  * @param absPath
@@ -145,9 +152,7 @@ void handleDelete(ConnectCtx *connectCtx) {
         bufWrite(&connectCtx->resp.writeBuf, "OK\n", 3);
     } else {
         connectCtx->resp.status = ERROR;
-        bufWrite(&connectCtx->resp.writeBuf, "ERROR\n", 6);
-        char *strErr = strerror(errno);
-        bufWrite(&(connectCtx->resp.writeBuf), strErr, (ssize_t) strlen(strErr));
+        setErrMsg(&(connectCtx->resp.writeBuf), strerror(errno));
     }
     connectCtx->resp.procState = SEND_HEADER;
 
@@ -158,28 +163,6 @@ void handleDelete(ConnectCtx *connectCtx) {
     }
 }
 
-
-uint64_t ntoh64(const uint64_t *input)
-{
-    uint64_t rval;
-    uint8_t *data = (uint8_t *)&rval;
-
-    data[0] = *input >> 56;
-    data[1] = *input >> 48;
-    data[2] = *input >> 40;
-    data[3] = *input >> 32;
-    data[4] = *input >> 24;
-    data[5] = *input >> 16;
-    data[6] = *input >> 8;
-    data[7] = *input >> 0;
-
-    return rval;
-}
-
-uint64_t hton64(const uint64_t *input)
-{
-    return (ntoh64(input));
-}
 
 /**
  *
@@ -207,8 +190,7 @@ void handleGet(ConnectCtx *connectCtx) {
     }
 
     if (connectCtx->resp.status == ERROR) {
-        bufWrite(&(connectCtx->resp.writeBuf), "ERROR\n", 6);
-        bufWrite(&(connectCtx->resp.writeBuf), errMsg, strlen(errMsg));
+        setErrMsg(&(connectCtx->resp.writeBuf), errMsg);
     } else {
         connectCtx->resp.status = OK;
         connectCtx->openedFiles[0] = fd;
@@ -228,87 +210,131 @@ void handleGet(ConnectCtx *connectCtx) {
 }
 
 
+int openLocalFile(char *fileName) {
+    char absBase[1024] = {0};
+    char absPath[1500] = {0};
+    getcwd(absBase, 1024);
+    sprintf(absPath, "%s/%s", absBase, fileName);
+
+    fprintf(stderr, "POST [%s]\n", absPath);
+
+    int outFd = open(absPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG);
+    if (outFd == -1) {
+        fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
+        return OPEN_ERROR;
+    } else {
+        return outFd;
+    }
+}
+
+
 /**
- *
+ * 处理POST请求
  * @param connectCtx
  */
-void handlePost(ConnectCtx *connCtx) {
-    if (connCtx->req.reqProcState == PARSE_CONTENT_LEN) {
-        //获取文件长度8个字节
-        const int bitWidth = sizeof(uint64_t);
-        uint64_t contentLength = 0;
-        if (getBufSize(&(connCtx->req.readBuf)) >= bitWidth) {
-            bufRead(&(connCtx->req.readBuf), (char *) &contentLength, bitWidth);
-            connCtx->req.contentLength = ntoh64(&contentLength);
-            fprintf(stderr, "contentLength: %ld\n", connCtx->req.contentLength);
-            connCtx->req.reqProcState = RECV_POST;
+void handlePost(ConnectCtx *connectCtx) {
+    //获取文件长度8个字节, 然后把打开本地文件存储数据
+    if (connectCtx->req.reqProcState == PARSE_CONTENT_LEN) {
+        const int bitWidth = sizeof(ssize_t);
+        if (getBufSize(&(connectCtx->req.readBuf)) >= bitWidth) {
+            bufRead(&(connectCtx->req.readBuf), (char *) &(connectCtx->req.contentLength), bitWidth);
+            fprintf(stderr, "contentLength: %ld\n", connectCtx->req.contentLength);
+
+            //打开本地文件，接受客户端发送的数据
+            connectCtx->openedFiles[0] = openLocalFile(connectCtx->req.fileName);
+            if (connectCtx->openedFiles[0] == OPEN_ERROR) {
+                connectCtx->resp.status = ERROR;
+                setErrMsg(&(connectCtx->resp.writeBuf), strerror(errno));
+            }
+            connectCtx->req.reqProcState = RECV_POST;
         } else {
             return;
         }
     }
 
-    if (connCtx->req.reqProcState != RECV_POST) {
-        return;
-    }
-
-    if (connCtx->openedFiles[0] == -1) {
-        char absBase[1024] = {0};
-        char absPath[1500] = {0};
-        getcwd(absBase, 1024);
-        sprintf(absPath, "%s/%s", absBase, connCtx->req.fileName);
-
-        fprintf(stderr, "POST [%s]\n", absPath);
-
-        int outFd = open(absPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG);
-        if (outFd == -1) {
-            fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
-            //todo need to handle error
-        }
-        connCtx->openedFiles[0] = outFd;
-    }
-
-
-    ssize_t hasGot = 0;
-    while (hasGot < BYTES_HANDLE_ONE_TIME) {
-        ssize_t bufSize = getBufSize(&(connCtx->req.readBuf));
-        if (bufSize == 0) {
-            ssize_t len = copyToBuf(&connCtx->req.readBuf, connCtx->socketFd);
-            if (len == 0) {
-                close(connCtx->openedFiles[0]);
-                connCtx->resp.status = OK;
-                connCtx->resp.procState = SEND_HEADER;
-                connCtx->event.events = EPOLLET | EPOLLOUT;
-                if (epoll_ctl(connCtx->epollFd, EPOLL_CTL_MOD, connCtx->socketFd, &connCtx->event) == -1) {
-                    fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
-                    abort();
+    //接受上传的数据
+    if (connectCtx->req.reqProcState == RECV_POST) {
+        ssize_t hasGot = 0;
+        //由于进入该函数前，数据在hanleRead函数执行了一次，读取量一般会超过BYTES_HANDLE_ONE_TIME，
+        //所以一般不会进入第一个if分支，while循环也只执行一次。
+        while (hasGot < BYTES_HANDLE_ONE_TIME) {
+            ssize_t bufSize = getBufSize(&(connectCtx->req.readBuf));
+            //如果需要被写入文件的缓冲区已经没有数据，那么从套接字中读取一次
+            if (bufSize == 0) {
+                ssize_t expectedByteCnt = connectCtx->req.contentLength - connectCtx->req.hasRecvd;
+                if (expectedByteCnt > BYTES_HANDLE_ONE_TIME) {
+                    expectedByteCnt = BYTES_HANDLE_ONE_TIME;
                 }
-                return;
-            } else if (len == -1) {
-                //fprintf(stdout, "%s %d %s\n", __FILE__, __LINE__, "read get -1");
-                if (errno == EAGAIN) {
-                    connCtx->resp.procState = SEND_HEADER;
+
+                ssize_t realCnt = 0;
+                ssize_t retVal = copyNByteToBuf(&connectCtx->req.readBuf, connectCtx->socketFd, expectedByteCnt, &realCnt);
+
+                if (retVal > 0) { //还有数据要读
+
+                } else if (retVal == 0) {//数据读完
+                    connectCtx->req.reqProcState = DONE;
+                } else if (retVal == -EAGAIN) { //读阻塞, 直接返回
                     return;
-                } else {
-                    abort();
+                } else {//读出错
+                    connectCtx->resp.status = ERROR;
+                    setErrMsg(&connectCtx->resp.writeBuf, strerror(errno));
+                    connectCtx->resp.procState = SEND_HEADER;
                 }
-            } else if (len == -2) {
-                fprintf(stdout, "%s %d malloc %s", __FILE__, __LINE__, strerror(errno));
-                abort();
+            }
+
+            bufSize = getBufSize(&connectCtx->req.readBuf);
+            if (bufSize == 0) {
+                break;
+            }
+
+            hasGot += bufSize;
+            connectCtx->req.hasRecvd += bufSize;//更新已读数据量
+
+            ssize_t n = bufSize;
+            if (connectCtx->openedFiles[0] != OPEN_ERROR) {
+                n = bufReadToFile(&connectCtx->req.readBuf, connectCtx->openedFiles[0], bufSize);
+            } else {
+                clearBuf(&connectCtx->req.readBuf);
+            }
+
+            if (n != bufSize) {
+                connectCtx->openedFiles[0] = OPEN_ERROR;
+                connectCtx->resp.status = ERROR;
+                setErrMsg(&(connectCtx->resp.writeBuf), "Failed to write byte to remote file");
             }
         }
 
-        bufSize = getBufSize(&connCtx->req.readBuf);
-        if (bufSize > 0) {
-            ssize_t n = bufReadToFile(&connCtx->req.readBuf, connCtx->openedFiles[0], bufSize);
-            if (n > 0) {
-                hasGot += n;
-            } else {
-                return;
-            }
+        connectCtx->event.events = EPOLLET | EPOLLIN; //继续监听
+        if (epoll_ctl(connectCtx->epollFd, EPOLL_CTL_MOD, connectCtx->socketFd, &connectCtx->event) == -1) {
+            fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
+            abort();
         }
+
+        //printf("%ld %d\n", hasGot, BYTES_HANDLE_ONE_TIME);
+    }
+
+
+    if (connectCtx->req.reqProcState == DONE) {
+        connectCtx->event.events = EPOLLET | EPOLLOUT;
+        if (epoll_ctl(connectCtx->epollFd, EPOLL_CTL_MOD, connectCtx->socketFd, &connectCtx->event) == -1) {
+            fprintf(stderr, "%s %d %s\n", __FILE__, __LINE__, strerror(errno));
+            abort();
+        }
+
+        if (connectCtx->openedFiles[0] != OPEN_ERROR && connectCtx->req.contentLength != connectCtx->req.hasRecvd) {
+            connectCtx->resp.status = ERROR;
+            setErrMsg(&(connectCtx->resp.writeBuf),
+                      connectCtx->req.contentLength < connectCtx->req.hasRecvd ? "Send too many bytes to server" : "Send too less bytes to server" );
+        }
+
+        //没有发生错误，就是OK
+        if (connectCtx->resp.status != ERROR) {
+            connectCtx->resp.status = OK;
+            bufWrite(&connectCtx->resp.writeBuf, "OK\n", 3);
+        }
+        connectCtx->resp.procState = SEND_HEADER;
     }
 }
-
 
 
 void handleError(ConnectCtx *connectCtx) {
